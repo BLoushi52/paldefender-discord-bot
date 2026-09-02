@@ -6,7 +6,8 @@ param(
     [string]$BrandName,
     [string]$ActivityText,
     [string]$CopyrightText,
-    [string]$SupportUrl
+    [string]$SupportUrl,
+    [string]$TaskName = "PalDefender Discord Bot"
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +19,24 @@ function Write-Utf8WithoutBom {
     )
 
     $encoding = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+    $directory = Split-Path $Path -Parent
+    $temporaryPath = Join-Path $directory ".$([System.IO.Path]::GetFileName($Path)).$PID.tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporaryPath, $Content, $encoding)
+        Move-Item -Path $temporaryPath -Destination $Path -Force
+    }
+    finally {
+        Remove-Item $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Protect-AdminFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-32-544:(F)" "*S-1-5-18:(F)" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to secure file permissions: $Path"
+    }
 }
 
 function Assert-Administrator {
@@ -184,28 +202,10 @@ $permissions = @(
     "REST.Base.Delete"
 )
 
-$palDefenderToken = New-RandomHexToken
-$tokensDirectory = Join-Path $PalDefenderRestDirectory "Tokens"
-New-Item -ItemType Directory -Path $tokensDirectory -Force | Out-Null
-
-$tokenPath = Join-Path $tokensDirectory "DiscordBot.json"
-if (Test-Path $tokenPath) {
-    $revokedBackup = Join-Path $tokensDirectory "DiscordBot.json.revoked-$timestamp.bak"
-    Move-Item $tokenPath $revokedBackup
-    Write-Host "Deactivated the previous DiscordBot token file: $revokedBackup"
-}
-
-$tokenDocument = [ordered]@{
-    Name = "DiscordBot"
-    Token = $palDefenderToken
-    Permissions = $permissions
-}
-Write-Utf8WithoutBom -Path $tokenPath -Content ($tokenDocument | ConvertTo-Json -Depth 10)
-Write-Host "Created a separate PalDefender service token: $tokenPath"
-
 $secureDiscordToken = Read-Host "Paste the Discord bot token (input is hidden)" -AsSecureString
 $bstr = [IntPtr]::Zero
 $discordToken = $null
+$envContent = $null
 try {
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureDiscordToken)
     $discordToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
@@ -222,21 +222,15 @@ try {
         "BOT_COPYRIGHT_TEXT=$(ConvertTo-DotEnvValue $CopyrightText)",
         "BOT_SUPPORT_URL=$(ConvertTo-DotEnvValue $SupportUrl)",
         'PALDEFENDER_BASE_URL="http://127.0.0.1:17993"',
-        "PALDEFENDER_TOKEN=$(ConvertTo-DotEnvValue $palDefenderToken)",
+        'PALDEFENDER_TOKEN=__PALDEFENDER_TOKEN__',
         'PALDEFENDER_TIMEOUT_MS="7000"',
+        'PALDEFENDER_MAX_RESPONSE_BYTES="7340032"',
         'DISCORD_ALLOWED_USER_IDS=""',
         'DISCORD_ALLOWED_ROLE_IDS=""',
-        'PALDEFENDER_ALLOW_REMOTE="false"'
+        'PALDEFENDER_ALLOW_REMOTE="false"',
+        'PALDEFENDER_ALLOW_INSECURE_REMOTE="false"'
     )
     $envContent = $envLines -join "`r`n"
-
-    $envPath = Join-Path $projectRoot ".env"
-    if (Test-Path $envPath) {
-        $envBackup = "$envPath.$timestamp.bak"
-        Copy-Item $envPath $envBackup
-        Write-Host "Backed up the existing .env file: $envBackup"
-    }
-    Write-Utf8WithoutBom -Path $envPath -Content $envContent
 }
 finally {
     if ($bstr -ne [IntPtr]::Zero) {
@@ -246,67 +240,177 @@ finally {
     $secureDiscordToken = $null
 }
 
-& icacls.exe (Join-Path $projectRoot ".env") /inheritance:r | Out-Null
-& icacls.exe (Join-Path $projectRoot ".env") /grant:r "*S-1-5-32-544:(F)" "*S-1-5-18:(F)" | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to secure .env permissions with icacls."
-}
-Write-Host "Created and secured: $(Join-Path $projectRoot '.env')"
+$palDefenderToken = New-RandomHexToken
+$envContent = $envContent.Replace("__PALDEFENDER_TOKEN__", (ConvertTo-DotEnvValue $palDefenderToken))
+$tokensDirectory = Join-Path $PalDefenderRestDirectory "Tokens"
+New-Item -ItemType Directory -Path $tokensDirectory -Force | Out-Null
 
-$npm = Get-Command npm.cmd -ErrorAction Stop
-Push-Location $projectRoot
+$tokenPath = Join-Path $tokensDirectory "DiscordBot.json"
+$envPath = Join-Path $projectRoot ".env"
+$tokenBackup = $null
+$envBackup = $null
+$hadToken = Test-Path $tokenPath
+$hadEnv = Test-Path $envPath
+$tokenMutationStarted = $false
+$envMutationStarted = $false
+$existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$existingTaskWasRunning = ($null -ne $existingTask) -and $existingTask.State -eq "Running"
+$existingTaskWasDisabled = ($null -ne $existingTask) -and $existingTask.State -eq "Disabled"
+
 try {
-    & $npm.Source ci --omit=dev
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+    Write-Host "Stopping any existing '$TaskName' instance before rotating credentials."
+    & (Join-Path $projectRoot "deploy\manage-windows-task.ps1") -Action Stop -TaskName $TaskName
 
-    & $npm.Source run check
-    if ($LASTEXITCODE -ne 0) { throw "Bot validation failed." }
+    if ($hadToken) {
+        $tokenBackup = Join-Path $tokensDirectory "DiscordBot.json.revoked-$timestamp.bak"
+        Move-Item $tokenPath $tokenBackup
+        $tokenMutationStarted = $true
+        Write-Host "Deactivated the previous DiscordBot token file: $tokenBackup"
+    }
+    else {
+        $tokenMutationStarted = $true
+    }
 
-    & $npm.Source test
-    if ($LASTEXITCODE -ne 0) { throw "Bot tests failed." }
+    $tokenDocument = [ordered]@{
+        Name = "DiscordBot"
+        Token = $palDefenderToken
+        Permissions = $permissions
+    }
+    Write-Utf8WithoutBom -Path $tokenPath -Content ($tokenDocument | ConvertTo-Json -Depth 10)
+    Write-Host "Created a separate PalDefender service token: $tokenPath"
 
-    & $npm.Source run deploy-commands
-    if ($LASTEXITCODE -ne 0) { throw "Discord slash-command deployment failed." }
+    if ($hadEnv) {
+        $envBackup = "$envPath.$timestamp.bak"
+        Copy-Item $envPath $envBackup
+        Protect-AdminFile -Path $envBackup
+        Write-Host "Backed up and secured the existing .env file: $envBackup"
+    }
+    $envMutationStarted = $true
+    Write-Utf8WithoutBom -Path $envPath -Content $envContent
+    Protect-AdminFile -Path $envPath
+    Write-Host "Created and secured: $envPath"
+
+    $npm = Get-Command npm.cmd -ErrorAction Stop
+    Push-Location $projectRoot
+    try {
+        & $npm.Source ci --omit=dev
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+
+        & $npm.Source run validate
+        if ($LASTEXITCODE -ne 0) { throw "Bot validation failed." }
+
+        & $npm.Source run deploy-commands
+        if ($LASTEXITCODE -ne 0) { throw "Discord slash-command deployment failed." }
+    }
+    finally {
+        Pop-Location
+    }
+
+    $launcherPath = Join-Path $projectRoot "deploy\start-bot.cmd"
+    $taskArgument = '/d /c ""{0}""' -f $launcherPath
+    $action = New-ScheduledTaskAction `
+        -Execute (Join-Path $env:SystemRoot "System32\cmd.exe") `
+        -Argument $taskArgument `
+        -WorkingDirectory $projectRoot
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "SYSTEM" `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet `
+        -RestartCount 999 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -MultipleInstances IgnoreNew
+
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Description "Discord bridge for one local PalDefender server and one Discord guild" `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
+    Start-Sleep -Seconds 2
+    if ((Get-ScheduledTask -TaskName $TaskName).State -ne "Running") {
+        throw "The scheduled task did not remain running. Check logs\bot.log."
+    }
+
 }
-finally {
-    Pop-Location
+catch {
+    $configurationError = $_
+    Write-Warning "Configuration failed. Restoring the previous credentials and task state."
+
+    try {
+        & (Join-Path $projectRoot "deploy\manage-windows-task.ps1") -Action Stop -TaskName $TaskName
+    }
+    catch {
+        Write-Warning "Rollback could not stop the failed bot instance: $($_.Exception.Message)"
+    }
+
+    try {
+        if ($tokenMutationStarted) {
+            Remove-Item $tokenPath -Force -ErrorAction SilentlyContinue
+            if ($tokenBackup -and (Test-Path $tokenBackup)) {
+                Move-Item $tokenBackup $tokenPath -Force
+            }
+        }
+    }
+    catch {
+        Write-Warning "Rollback could not restore the previous PalDefender token: $($_.Exception.Message)"
+    }
+
+    try {
+        if ($envMutationStarted) {
+            if ($hadEnv -and $envBackup -and (Test-Path $envBackup)) {
+                Copy-Item $envBackup $envPath -Force
+                Protect-AdminFile -Path $envPath
+            }
+            elseif (-not $hadEnv) {
+                Remove-Item $envPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Warning "Rollback could not restore the previous .env file: $($_.Exception.Message)"
+    }
+
+    try {
+        if ($null -eq $existingTask) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        elseif ($existingTaskWasDisabled) {
+            Disable-ScheduledTask -TaskName $TaskName | Out-Null
+        }
+        elseif ($existingTaskWasRunning) {
+            Enable-ScheduledTask -TaskName $TaskName | Out-Null
+            Start-ScheduledTask -TaskName $TaskName
+        }
+    }
+    catch {
+        Write-Warning "Rollback could not restore the previous task state: $($_.Exception.Message)"
+    }
+
+    throw $configurationError
 }
 
-$taskName = "PalDefender Discord Bot"
-$launcherPath = Join-Path $projectRoot "deploy\start-bot.cmd"
-$taskArgument = '/d /c ""{0}""' -f $launcherPath
-$action = New-ScheduledTaskAction `
-    -Execute (Join-Path $env:SystemRoot "System32\cmd.exe") `
-    -Argument $taskArgument `
-    -WorkingDirectory $projectRoot
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal `
-    -UserId "SYSTEM" `
-    -LogonType ServiceAccount `
-    -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet `
-    -RestartCount 999 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -MultipleInstances IgnoreNew
-
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Description "Discord bridge for the local PalDefender REST API" `
-    -Action $action `
-    -Trigger $trigger `
-    -Principal $principal `
-    -Settings $settings `
-    -Force | Out-Null
-Start-ScheduledTask -TaskName $taskName
+if ($tokenBackup) {
+    try {
+        Protect-AdminFile -Path $tokenBackup
+    }
+    catch {
+        Write-Warning "The revoked token backup could not be restricted. Delete it manually: $tokenBackup"
+    }
+}
 
 Write-Host ""
 Write-Host "Configuration completed successfully." -ForegroundColor Green
 Write-Host "Discord application ID: $DiscordClientId"
 Write-Host "Discord server ID:      $DiscordGuildId"
 Write-Host "Bot brand name:         $BrandName"
-Write-Host "Scheduled task:         $taskName"
+Write-Host "Scheduled task:         $TaskName"
 Write-Warning "Restart the Palworld server now so it loads the new PalDefender token."
 Write-Host "After the restart, use /server status in Discord."
 Write-Host "Bot log: $projectRoot\logs\bot.log"

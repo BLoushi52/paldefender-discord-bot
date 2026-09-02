@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest release on the `main` branch. Users should upgrade to the newest tagged release before reporting an issue.
+Before the first tagged release, security fixes are applied to `main`. After releases begin, only the newest tagged release and current `main` are supported.
 
 ## Reporting a vulnerability
 
@@ -21,3 +21,7 @@ Include the affected version, impact, reproduction steps, and any suggested miti
 5. Remove the secret from Git history if it was committed. Rotating it is still mandatory.
 
 The bot refuses to start when `DISCORD_TOKEN` and `PALDEFENDER_TOKEN` are identical.
+
+## Deployment boundary
+
+This project is self-hosted and single-guild. Each operator must use a dedicated Discord application, a required `DISCORD_GUILD_ID`, and an independent PalDefender token. Do not offer one installation as a shared public multi-server bot. Keep PalDefender on loopback; remote HTTP requires a deliberately separate insecure opt-in because bearer tokens would otherwise cross the network without encryption.

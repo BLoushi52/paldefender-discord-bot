@@ -11,6 +11,7 @@ function memberRoleIds(member) {
 
 function isAuthorized(interaction, config) {
   if (!interaction.inGuild()) return false;
+  if (interaction.guildId !== config.discordGuildId) return false;
 
   if (interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return true;
   if (config.allowedUserIds.has(interaction.user.id)) return true;

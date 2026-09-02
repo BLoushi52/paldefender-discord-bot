@@ -1,8 +1,10 @@
 'use strict';
 
+const path = require('node:path');
 const dotenv = require('dotenv');
+const { MAX_DISCORD_ATTACHMENT_BYTES } = require('./limits');
 
-dotenv.config({ quiet: true });
+dotenv.config({ path: path.resolve(__dirname, '..', '.env'), quiet: true });
 
 function required(env, key) {
   const value = env[key]?.trim();
@@ -12,22 +14,21 @@ function required(env, key) {
   return value;
 }
 
-function csv(value) {
-  return new Set(
-    (value || '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean),
-  );
-}
-
-function discordId(value, key, { optional = false } = {}) {
+function discordId(value, key) {
   const resolved = value?.trim() || '';
-  if (!resolved && optional) return null;
   if (!/^\d{17,20}$/.test(resolved)) {
     throw new Error(`${key} must be a 17-20 digit Discord ID.`);
   }
   return resolved;
+}
+
+function discordIdList(value, key) {
+  const ids = (value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => discordId(item, key));
+  return new Set(ids);
 }
 
 function boolean(value, fallback = false) {
@@ -35,6 +36,18 @@ function boolean(value, fallback = false) {
   if (/^(1|true|yes)$/i.test(value)) return true;
   if (/^(0|false|no)$/i.test(value)) return false;
   throw new Error(`Expected a boolean value, received: ${value}`);
+}
+
+function integer(value, fallback, key, minimum, maximum) {
+  const raw = value == null || value === '' ? String(fallback) : String(value);
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new Error(`${key} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  const resolved = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
+    throw new Error(`${key} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return resolved;
 }
 
 function text(value, fallback, key, maxLength) {
@@ -88,31 +101,52 @@ function getConfig(env = process.env) {
   if (!['http:', 'https:'].includes(parsedBaseUrl.protocol)) {
     throw new Error('PALDEFENDER_BASE_URL must use http:// or https://.');
   }
-  if (parsedBaseUrl.username || parsedBaseUrl.password || parsedBaseUrl.search || parsedBaseUrl.hash) {
-    throw new Error('PALDEFENDER_BASE_URL cannot contain credentials, a query, or a fragment.');
+  if (
+    parsedBaseUrl.username
+    || parsedBaseUrl.password
+    || parsedBaseUrl.pathname !== '/'
+    || parsedBaseUrl.search
+    || parsedBaseUrl.hash
+  ) {
+    throw new Error('PALDEFENDER_BASE_URL must be an origin without credentials, a path, a query, or a fragment.');
   }
 
   const allowRemote = boolean(env.PALDEFENDER_ALLOW_REMOTE, false);
-  if (!allowRemote && !isLoopback(parsedBaseUrl.hostname)) {
+  const remote = !isLoopback(parsedBaseUrl.hostname);
+  if (remote && !allowRemote) {
     throw new Error(
       'PALDEFENDER_BASE_URL must use localhost/127.0.0.1 unless PALDEFENDER_ALLOW_REMOTE=true.',
     );
   }
-
-  const timeoutMs = Number.parseInt(env.PALDEFENDER_TIMEOUT_MS || '7000', 10);
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30000) {
-    throw new Error('PALDEFENDER_TIMEOUT_MS must be an integer from 1000 to 30000.');
+  if (
+    remote
+    && parsedBaseUrl.protocol !== 'https:'
+    && !boolean(env.PALDEFENDER_ALLOW_INSECURE_REMOTE, false)
+  ) {
+    throw new Error(
+      'Remote PalDefender URLs must use HTTPS unless PALDEFENDER_ALLOW_INSECURE_REMOTE=true.',
+    );
   }
+
+  const timeoutMs = integer(env.PALDEFENDER_TIMEOUT_MS, 7000, 'PALDEFENDER_TIMEOUT_MS', 1000, 30000);
+  const maxResponseBytes = integer(
+    env.PALDEFENDER_MAX_RESPONSE_BYTES,
+    MAX_DISCORD_ATTACHMENT_BYTES,
+    'PALDEFENDER_MAX_RESPONSE_BYTES',
+    1024,
+    MAX_DISCORD_ATTACHMENT_BYTES,
+  );
 
   return Object.freeze({
     discordToken,
     discordClientId: discordId(env.DISCORD_CLIENT_ID, 'DISCORD_CLIENT_ID'),
-    discordGuildId: discordId(env.DISCORD_GUILD_ID, 'DISCORD_GUILD_ID', { optional: true }),
-    allowedUserIds: csv(env.DISCORD_ALLOWED_USER_IDS),
-    allowedRoleIds: csv(env.DISCORD_ALLOWED_ROLE_IDS),
-    palDefenderBaseUrl: parsedBaseUrl.toString().replace(/\/$/, ''),
+    discordGuildId: discordId(env.DISCORD_GUILD_ID, 'DISCORD_GUILD_ID'),
+    allowedUserIds: discordIdList(env.DISCORD_ALLOWED_USER_IDS, 'DISCORD_ALLOWED_USER_IDS'),
+    allowedRoleIds: discordIdList(env.DISCORD_ALLOWED_ROLE_IDS, 'DISCORD_ALLOWED_ROLE_IDS'),
+    palDefenderBaseUrl: parsedBaseUrl.origin,
     palDefenderToken,
     palDefenderTimeoutMs: timeoutMs,
+    palDefenderMaxResponseBytes: maxResponseBytes,
     branding: Object.freeze({
       name: text(env.BOT_BRAND_NAME, 'Palworld Admin', 'BOT_BRAND_NAME', 80),
       activity: text(env.BOT_ACTIVITY_TEXT, 'Managing Palworld', 'BOT_ACTIVITY_TEXT', 128),
@@ -122,4 +156,4 @@ function getConfig(env = process.env) {
   });
 }
 
-module.exports = { discordId, getConfig, isLoopback };
+module.exports = { discordId, discordIdList, getConfig, isLoopback };
