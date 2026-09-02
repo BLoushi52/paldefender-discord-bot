@@ -42,4 +42,4 @@
 - `/give progression` requires at least one grant. A relic type and relic amount must be supplied together.
 - `/guild delete-base` permanently deletes a base and requires the exact confirmation `DELETE`. Verify the camp ID using `/guild info` and maintain backups.
 
-The upstream API is the source of truth: [PalDefender REST API documentation](https://github.com/Ultimeit/PalDefender/tree/main/docs/en/RESTAPI).
+The mappings were verified against PalDefender v1.8.3. The upstream API remains the source of truth: [PalDefender REST API documentation](https://github.com/Ultimeit/PalDefender/tree/main/docs/en/RESTAPI).

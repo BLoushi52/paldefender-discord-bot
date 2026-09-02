@@ -11,7 +11,7 @@ const { PalDefenderApiError, PalDefenderClient } = require('./api');
 const { isAuthorized } = require('./authorization');
 const { executeCommand } = require('./commands');
 const { getConfig } = require('./config');
-const { errorReply, resultReply } = require('./response');
+const { errorReply, escapeMarkdown, resultReply } = require('./response');
 
 function audit(event, interaction, fields = {}) {
   const subcommand = interaction.options?.getSubcommand?.(false) || null;
@@ -26,34 +26,15 @@ function audit(event, interaction, fields = {}) {
   }));
 }
 
-async function main() {
-  const config = getConfig();
-  const api = new PalDefenderClient({
-    baseUrl: config.palDefenderBaseUrl,
-    token: config.palDefenderToken,
-    timeoutMs: config.palDefenderTimeoutMs,
-  });
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-  client.once(Events.ClientReady, (readyClient) => {
-    readyClient.user.setActivity(config.branding.activity, { type: ActivityType.Watching });
-    console.log(JSON.stringify({
-      timestamp: new Date().toISOString(),
-      event: 'ready',
-      botUser: readyClient.user.tag,
-      guildCount: readyClient.guilds.cache.size,
-      palDefenderBaseUrl: config.palDefenderBaseUrl,
-      brandName: config.branding.name,
-    }));
-  });
-
-  client.on(Events.InteractionCreate, async (interaction) => {
+function createInteractionHandler({ config, api, auditEvent = audit }) {
+  return async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
     if (!isAuthorized(interaction, config)) {
-      audit('denied', interaction);
+      auditEvent('denied', interaction);
       await interaction.reply({
-        content: `You are not authorized to use ${config.branding.name} admin commands.`,
+        content: `You are not authorized to use ${escapeMarkdown(config.branding.name)} admin commands.`,
+        allowedMentions: { parse: [] },
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -64,7 +45,7 @@ async function main() {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const result = await executeCommand(interaction, api);
       await interaction.editReply(resultReply(result, config.branding));
-      audit('command_complete', interaction, { durationMs: Date.now() - startedAt });
+      auditEvent('command_complete', interaction, { durationMs: Date.now() - startedAt });
     } catch (error) {
       try {
         if (interaction.deferred || interaction.replied) {
@@ -83,15 +64,40 @@ async function main() {
           message: replyError.message,
         }));
       }
-      audit('command_failed', interaction, {
+      auditEvent('command_failed', interaction, {
         durationMs: Date.now() - startedAt,
         errorType: error.name,
         errorCode: error instanceof PalDefenderApiError ? error.code : null,
         httpStatus: error instanceof PalDefenderApiError ? error.status : null,
-        message: error.message,
       });
     }
+  };
+}
+
+async function main() {
+  const config = getConfig();
+  const api = new PalDefenderClient({
+    baseUrl: config.palDefenderBaseUrl,
+    token: config.palDefenderToken,
+    timeoutMs: config.palDefenderTimeoutMs,
+    maxResponseBytes: config.palDefenderMaxResponseBytes,
   });
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+  client.once(Events.ClientReady, (readyClient) => {
+    readyClient.user.setActivity(config.branding.activity, { type: ActivityType.Watching });
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event: 'ready',
+      botUser: readyClient.user.tag,
+      guildCount: readyClient.guilds.cache.size,
+      discordGuildId: config.discordGuildId,
+      palDefenderBaseUrl: config.palDefenderBaseUrl,
+      brandName: config.branding.name,
+    }));
+  });
+
+  client.on(Events.InteractionCreate, createInteractionHandler({ config, api }));
 
   let shuttingDown = false;
   const shutdown = (signal) => {
@@ -106,12 +112,16 @@ async function main() {
   await client.login(config.discordToken);
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({
-    timestamp: new Date().toISOString(),
-    event: 'startup_failed',
-    errorType: error.name,
-    message: error.message,
-  }));
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event: 'startup_failed',
+      errorType: error.name,
+      message: error.message,
+    }));
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { audit, createInteractionHandler, main };

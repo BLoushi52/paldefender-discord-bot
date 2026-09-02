@@ -1,5 +1,7 @@
 # Linux deployment
 
+Each installation controls one Discord server and one PalDefender server. Create a dedicated Discord application for this instance and set the required `DISCORD_GUILD_ID` in `.env`.
+
 ## 1. Create the PalDefender token
 
 Enable the REST API in `Win64/PalDefender/RESTAPI/RESTConfig.json` and keep it on loopback/private networking. Create a token file from `examples/DiscordBot.example.json` in:
@@ -34,6 +36,8 @@ npm run validate
 npm run deploy-commands
 npm run doctor
 ```
+
+Command deployment removes stale global commands from the dedicated Discord application and registers the command groups only in `DISCORD_GUILD_ID`.
 
 ## 3. Install the systemd service
 
@@ -74,4 +78,4 @@ npm run deploy-commands
 sudo systemctl start paldefender-discord-bot
 ```
 
-The host needs outbound port `443` for Discord. Do not expose PalDefender port `17993` publicly.
+The host needs outbound port `443` for Discord. Do not expose PalDefender port `17993` publicly. Keep `PALDEFENDER_BASE_URL=http://127.0.0.1:17993` when the bot and game server share the host.

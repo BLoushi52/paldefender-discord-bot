@@ -17,7 +17,9 @@ Never use production Discord or PalDefender tokens in tests. Tests must use fake
 - Add or update tests for changed behavior.
 - Update documentation and `.env.example` for configuration changes.
 - Preserve ephemeral replies and authorization checks for administrative commands.
+- Preserve the single-installation boundary: one required Discord guild and one PalDefender server per process.
 - Do not weaken the loopback-only API default or log command payloads containing player data.
+- Keep global command cleanup in the deployment path; this project does not support a shared multi-guild bot.
 - Explain any PalDefender endpoint or permission changes and link to the upstream documentation.
 
 ## Adding an endpoint

@@ -1,5 +1,7 @@
 'use strict';
 
+const { MAX_DISCORD_ATTACHMENT_BYTES } = require('./limits');
+
 class PalDefenderApiError extends Error {
   constructor(message, { status = null, code = null, details = null, cause = null } = {}) {
     super(message, { cause });
@@ -18,12 +20,62 @@ function addQuery(url, query) {
   }
 }
 
+function responseTooLarge(maxBytes) {
+  return new PalDefenderApiError(
+    `PalDefender response exceeded the configured ${maxBytes}-byte safety limit.`,
+    { code: 'RESPONSE_TOO_LARGE' },
+  );
+}
+
+async function readResponseText(response, maxBytes) {
+  const contentLength = Number.parseInt(response.headers?.get?.('content-length') || '', 10);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    try {
+      await response.body?.cancel?.();
+    } catch {
+      // The size error below is more useful than a cleanup failure.
+    }
+    throw responseTooLarge(maxBytes);
+  }
+
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw responseTooLarge(maxBytes);
+    return text;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let receivedBytes = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    receivedBytes += value.byteLength;
+    if (receivedBytes > maxBytes) {
+      await reader.cancel();
+      throw responseTooLarge(maxBytes);
+    }
+    chunks.push(decoder.decode(value, { stream: true }));
+  }
+  chunks.push(decoder.decode());
+  return chunks.join('');
+}
+
 class PalDefenderClient {
-  constructor({ baseUrl, token, timeoutMs = 7000, fetchImpl = globalThis.fetch }) {
+  constructor({
+    baseUrl,
+    token,
+    timeoutMs = 7000,
+    maxResponseBytes = MAX_DISCORD_ATTACHMENT_BYTES,
+    fetchImpl = globalThis.fetch,
+  }) {
     if (typeof fetchImpl !== 'function') throw new Error('A fetch implementation is required.');
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.token = token;
     this.timeoutMs = timeoutMs;
+    this.maxResponseBytes = maxResponseBytes;
     this.fetchImpl = fetchImpl;
   }
 
@@ -47,8 +99,9 @@ class PalDefenderClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
       });
-      text = await response.text();
+      text = await readResponseText(response, this.maxResponseBytes);
     } catch (error) {
+      if (error instanceof PalDefenderApiError) throw error;
       if (error.name === 'AbortError') {
         throw new PalDefenderApiError(`PalDefender did not respond within ${this.timeoutMs} ms.`, {
           code: 'CLIENT_TIMEOUT',
@@ -91,9 +144,9 @@ class PalDefenderClient {
     return this.request('GET', path, { query });
   }
 
-  post(path, body = {}) {
+  post(path, body) {
     return this.request('POST', path, { body });
   }
 }
 
-module.exports = { PalDefenderApiError, PalDefenderClient };
+module.exports = { PalDefenderApiError, PalDefenderClient, readResponseText };
